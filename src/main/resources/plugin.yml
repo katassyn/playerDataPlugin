@@ -1,0 +1,4 @@
+name: PlayerDataPlugin
+version: '${project.version}'
+main: com.maks.playerdataplugin.Main
+api-version: '1.20'

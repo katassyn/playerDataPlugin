@@ -1,0 +1,4 @@
+name: PlayerDataPlugin
+version: '1.0-SNAPSHOT'
+main: com.maks.playerdataplugin.Main
+api-version: '1.20'
