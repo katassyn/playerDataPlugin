@@ -32,7 +32,7 @@ public class PlayerDataListener implements Listener {
 
         try {
             Connection conn = plugin.getDatabaseManager().getConnection();
-            String sql = "SELECT inventory, armor FROM player_data WHERE uuid=?";
+            String sql = "SELECT inventory, armor FROM player_data_info WHERE uuid=?";
             PreparedStatement stmt = conn.prepareStatement(sql);
             stmt.setString(1, uuid.toString());
             ResultSet rs = stmt.executeQuery();
@@ -67,7 +67,7 @@ public class PlayerDataListener implements Listener {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 Connection conn = plugin.getDatabaseManager().getConnection();
-                String sql = "REPLACE INTO player_data (uuid, inventory, armor) VALUES (?, ?, ?)";
+                String sql = "REPLACE INTO player_data_info (uuid, inventory, armor) VALUES (?, ?, ?)";
                 PreparedStatement stmt = conn.prepareStatement(sql);
                 stmt.setString(1, uuid.toString());
 

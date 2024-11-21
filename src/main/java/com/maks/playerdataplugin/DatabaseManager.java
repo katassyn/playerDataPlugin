@@ -47,7 +47,7 @@ public class DatabaseManager {
     }
 
     private void createTable() throws SQLException {
-        String sql = "CREATE TABLE IF NOT EXISTS player_data (" +
+        String sql = "CREATE TABLE IF NOT EXISTS player_data_info (" +
                 "uuid VARCHAR(36) PRIMARY KEY," +
                 "inventory TEXT," +
                 "armor TEXT" +
