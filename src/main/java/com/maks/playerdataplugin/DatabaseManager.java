@@ -1,14 +1,15 @@
 package com.maks.playerdataplugin;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 
 public class DatabaseManager {
 
     private final Main plugin;
-    private Connection connection;
+    private HikariDataSource dataSource;
 
     public DatabaseManager(Main plugin) {
         this.plugin = plugin;
@@ -21,14 +22,25 @@ public class DatabaseManager {
         String user = plugin.getConfig().getString("database.user");
         String password = plugin.getConfig().getString("database.password");
 
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + database + "?useSSL=false&allowPublicKeyRetrieval=true");
+        config.setUsername(user);
+        config.setPassword(password);
+
+        // HikariCP settings
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(5);
+        config.setIdleTimeout(300000); // 5 minutes
+        config.setConnectionTimeout(10000); // 10 seconds
+        config.setMaxLifetime(1800000); // 30 minutes
+        config.addDataSourceProperty("cachePrepStmts", "true");
+        config.addDataSourceProperty("prepStmtCacheSize", "250");
+        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
+
         try {
-            connection = DriverManager.getConnection(
-                    "jdbc:mysql://" + host + ":" + port + "/" + database + "?useSSL=false&allowPublicKeyRetrieval=true",
-                    user,
-                    password
-            );
+            dataSource = new HikariDataSource(config);
             createTable();
-            plugin.getLogger().info("Connected to the database.");
+            plugin.getLogger().info("Connected to the database using HikariCP.");
         } catch (SQLException e) {
             e.printStackTrace();
             plugin.getLogger().severe("Failed to connect to the database.");
@@ -36,13 +48,9 @@ public class DatabaseManager {
     }
 
     public void disconnect() {
-        if (connection != null) {
-            try {
-                connection.close();
-                plugin.getLogger().info("Disconnected from the database.");
-            } catch (SQLException e) {
-                e.printStackTrace();
-            }
+        if (dataSource != null && !dataSource.isClosed()) {
+            dataSource.close();
+            plugin.getLogger().info("Disconnected from the database.");
         }
     }
 
@@ -52,12 +60,13 @@ public class DatabaseManager {
                 "inventory TEXT," +
                 "armor TEXT" +
                 ");";
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.execute();
-        statement.close();
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.execute();
+        }
     }
 
-    public Connection getConnection() {
-        return connection;
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
     }
 }
