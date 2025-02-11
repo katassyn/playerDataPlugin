@@ -1,103 +1,110 @@
-
 # PlayerDataPlugin
 
-A Minecraft plugin designed to handle player inventory and armor data using a MySQL database for persistent storage. This plugin ensures that players' data is saved and restored seamlessly, even across server restarts or reloads.
-
----
+A high-performance Minecraft plugin for saving player inventory data to MySQL database instead of player data files. This plugin uses HikariCP for efficient database connection pooling and async operations for optimal server performance.
 
 ## Features
 
-1. **Persistent Player Data**  
-   - Saves player inventory and armor to a MySQL database.
-   - Automatically restores player data upon login.
+- Saves player inventory and armor data to MySQL database
+- Uses connection pooling with HikariCP for optimal database performance
+- Asynchronous data saving to prevent server lag
+- Automatic periodic saving every 5 minutes
+- Disables default player data saving to files for better performance
+- Safe data loading on player join
+- Automatic data saving on player quit
 
-2. **Scheduled Data Backup**  
-   - Periodically saves all online players' data every 5 minutes.
+## Requirements
 
-3. **Configurable Database Connection**  
-   - Connects to a MySQL database using customizable settings in `config.yml`.
-
-4. **Asynchronous Operations**  
-   - Database interactions are performed asynchronously to avoid server lag.
-
----
-
-## Configuration
-
-The plugin uses a `config.yml` file to define database connection settings. Example configuration:
-
-```yaml
-database:
-  host: "host"
-  port: "port"
-  name: "database name"
-  user: "username"
-  password: "password"
-```
-
-### Configuration Details
-- **`host`**: The MySQL server's hostname or IP address.
-- **`port`**: The port MySQL is running on.
-- **`name`**: The name of the database to connect to.
-- **`user`**: The username for the database connection.
-- **`password`**: The password for the database connection.
-
----
+- Java 8 or higher
+- MySQL/MariaDB database
+- Paper/Spigot 1.20.1 (may work with other versions, but untested)
+- Maven (for building)
 
 ## Installation
 
-1. Place the plugin JAR file into your server's `plugins` folder.
-2. Start or reload your server to generate the default configuration file (`config.yml`).
-3. Update `config.yml` with your database connection details.
-4. Restart your server to apply the configuration.
+1. Download the latest release or build from source
+2. Place the jar file in your server's `plugins` folder
+3. Start the server once to generate the config file
+4. Configure the database settings in `plugins/PlayerDataPlugin/config.yml`
+5. Restart your server
 
----
+## Configuration
 
-## How It Works
+Create `config.yml` in the plugin directory with the following structure:
 
-1. **Player Join**
-   - Clears the player's inventory and armor.
-   - Fetches saved data from the database and restores it to the player.
+```yaml
+database:
+  host: localhost
+  port: 3306
+  name: your_database_name
+  user: your_username
+  password: your_password
+```
 
-2. **Player Quit**
-   - Saves the player's inventory and armor to the database.
+## Building from Source
 
-3. **Scheduled Save**
-   - Every 5 minutes, all online players' data is saved to the database.
+```bash
+git clone https://github.com/yourusername/PlayerDataPlugin.git
+cd PlayerDataPlugin
+mvn clean package
+```
 
-4. **Database Table**
-   - The plugin creates a table `player_data` in the MySQL database:
-     ```sql
-     CREATE TABLE IF NOT EXISTS player_data (
-         uuid VARCHAR(36) PRIMARY KEY,
-         inventory TEXT,
-         armor TEXT
-     );
-     ```
+The built jar will be in the `target` directory.
 
----
+## Database Schema
 
-## Serialization
+The plugin uses the following table structure:
 
-The plugin uses `SerializationUtils` to:
-- Convert player inventory and armor into a Base64 string for storage in the database.
-- Deserialize stored Base64 strings back into `ItemStack[]` for restoration.
+```sql
+CREATE TABLE IF NOT EXISTS player_data_info (
+    uuid VARCHAR(36) PRIMARY KEY,
+    inventory TEXT,
+    armor TEXT
+);
+```
 
----
+## Technical Details
 
-## Example Usage
+### Connection Pooling
+- Uses HikariCP for database connection management
+- Configured with optimized pool settings:
+  - Maximum pool size: 10 connections
+  - Minimum idle connections: 5
+  - Connection timeout: 10 seconds
+  - Maximum lifetime: 30 minutes
+  - Prepared statement caching enabled
 
-1. **Player Login**
-   - A player logs in, and their saved inventory and armor are loaded from the database.
+### Data Serialization
+- Inventory and armor data are serialized using Bukkit's serialization utilities
+- Data is stored in Base64 encoded format
+- Uses efficient binary serialization for ItemStack objects
 
-2. **Player Logout**
-   - A player's inventory and armor are saved to the database upon logging out.
+### Performance Considerations
+- Asynchronous saving operations
+- Connection pooling for optimal database performance
+- Periodic saving to prevent data loss
+- Proper resource cleanup and connection handling
 
-3. **Server Restart**
-   - The plugin ensures all online players' data is saved before the server shuts down.
+## Contributing
 
----
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Support
 
-If you encounter issues or have suggestions for improvements, feel free to open an issue in the repository or contact the developer.
+If you encounter any issues or have questions, please create an issue on the GitHub repository.
+
+## Authors
+
+- Your Name - *Initial work*
+
+## Acknowledgments
+
+- PaperMC Team for the amazing server software
+- HikariCP for the excellent connection pooling library
