@@ -2,3 +2,37 @@ name: PlayerDataPlugin
 version: '${project.version}'
 main: com.maks.playerdataplugin.Main
 api-version: '1.20'
+authors: [Maks]
+description: A plugin that saves player inventory data and statistics to MySQL database
+
+# Soft dependencies (optional plugins that enhance functionality)
+softdepend: [Vault]
+
+# Commands
+commands:
+  stats:
+    description: View player statistics
+    usage: /<command> [player]
+    aliases: [statistics, playerstats]
+
+# Permissions
+permissions:
+  playerdataplugin.stats:
+    description: Allows viewing own statistics
+    default: true
+
+  playerdataplugin.stats.others:
+    description: Allows viewing other players' statistics  
+    default: op
+
+  playerdataplugin.stats.reload:
+    description: Allows reloading player statistics
+    default: op
+
+  playerdataplugin.admin:
+    description: Gives access to all plugin features
+    default: op
+    children:
+      playerdataplugin.stats: true
+      playerdataplugin.stats.others: true
+      playerdataplugin.stats.reload: true

@@ -39,7 +39,7 @@ public class DatabaseManager {
 
         try {
             dataSource = new HikariDataSource(config);
-            createTable();
+            createTables();
             plugin.getLogger().info("Connected to the database using HikariCP.");
         } catch (SQLException e) {
             e.printStackTrace();
@@ -54,15 +54,38 @@ public class DatabaseManager {
         }
     }
 
-    private void createTable() throws SQLException {
-        String sql = "CREATE TABLE IF NOT EXISTS player_data_info (" +
+    private void createTables() throws SQLException {
+        // Create player_data_info table
+        String playerDataSql = "CREATE TABLE IF NOT EXISTS player_data_info (" +
                 "uuid VARCHAR(36) PRIMARY KEY," +
                 "inventory TEXT," +
                 "armor TEXT" +
                 ");";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.execute();
+
+        // Create player_stats table
+        String playerStatsSql = "CREATE TABLE IF NOT EXISTS player_stats (" +
+                "uuid VARCHAR(36) NOT NULL PRIMARY KEY," +
+                "username VARCHAR(16)," +
+                "mobs_killed INT DEFAULT 0," +
+                "players_killed INT DEFAULT 0," +
+                "deaths INT DEFAULT 0," +
+                "playtime_hours DOUBLE DEFAULT 0.0," +
+                "balance DOUBLE DEFAULT 0.0," +
+                "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" +
+                ");";
+
+        try (Connection connection = getConnection()) {
+            // Create player_data_info table
+            try (PreparedStatement statement = connection.prepareStatement(playerDataSql)) {
+                statement.execute();
+                plugin.getLogger().info("Player data table created/verified.");
+            }
+
+            // Create player_stats table
+            try (PreparedStatement statement = connection.prepareStatement(playerStatsSql)) {
+                statement.execute();
+                plugin.getLogger().info("Player stats table created/verified.");
+            }
         }
     }
 
