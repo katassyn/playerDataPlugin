@@ -20,6 +20,7 @@ import java.util.Map;
 public class PlayerDataListener implements Listener {
 
     private final Main plugin;
+    private final FirstJoinKitManager kitManager;
     private final Set<UUID> savingPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, PlayerData> playerDataCache = new HashMap<>();
     private boolean debugMode = false;
@@ -37,8 +38,9 @@ public class PlayerDataListener implements Listener {
         }
     }
 
-    public PlayerDataListener(Main plugin) {
+    public PlayerDataListener(Main plugin, FirstJoinKitManager kitManager) {
         this.plugin = plugin;
+        this.kitManager = kitManager;
         this.debugMode = plugin.getConfig().getBoolean("debug", false);
         this.maxRetryAttempts = plugin.getConfig().getInt("database.maxRetryAttempts", 3);
         this.retryDelayMs = plugin.getConfig().getLong("database.retryDelayMs", 1000);
@@ -165,6 +167,8 @@ public class PlayerDataListener implements Listener {
             plugin.getLogger().severe("Failed to load player data for " + playerName);
             logDebug("Database error while loading data for player " + playerName + ": " + e.getMessage());
         }
+        // Give starter kit if applicable
+        kitManager.giveKitIfFirstJoin(event.getPlayer());
 
         logDebug("Finished loading data for player " + playerName);
     }

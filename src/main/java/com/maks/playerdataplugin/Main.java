@@ -1,9 +1,5 @@
 package com.maks.playerdataplugin;
 
-import com.maks.playerdataplugin.DatabaseManager;
-import com.maks.playerdataplugin.PlayerDataListener;
-import com.maks.playerdataplugin.PlayerStatsManager;
-import com.maks.playerdataplugin.PlayerStatsListener;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public class Main extends JavaPlugin {
@@ -13,6 +9,8 @@ public class Main extends JavaPlugin {
     private PlayerDataListener playerDataListener;
     private PlayerStatsManager playerStatsManager;
     private PlayerStatsListener playerStatsListener;
+    private FirstJoinKitManager firstJoinKitManager;
+    private FirstJoinKitListener firstJoinKitListener;
 
     @Override
     public void onEnable() {
@@ -28,6 +26,9 @@ public class Main extends JavaPlugin {
         databaseManager = new DatabaseManager(this);
         databaseManager.connect();
 
+        // Initialize first join kit manager
+        firstJoinKitManager = new FirstJoinKitManager(this);
+
         // Initialize stats manager
         try {
             playerStatsManager = new PlayerStatsManager(this);
@@ -39,8 +40,11 @@ public class Main extends JavaPlugin {
         }
 
         // Register event listeners
-        playerDataListener = new PlayerDataListener(this);
+        playerDataListener = new PlayerDataListener(this, firstJoinKitManager);
         getServer().getPluginManager().registerEvents(playerDataListener, this);
+
+        firstJoinKitListener = new FirstJoinKitListener(firstJoinKitManager);
+        getServer().getPluginManager().registerEvents(firstJoinKitListener, this);
 
         if (playerStatsManager != null) {
             playerStatsListener = new PlayerStatsListener(this, playerStatsManager);
@@ -51,6 +55,10 @@ public class Main extends JavaPlugin {
             getCommand("stats").setExecutor(statsCommand);
             getCommand("stats").setTabCompleter(statsCommand);
         }
+
+        // Register first join kit command
+        FirstJoinKitCommand firstJoinKitCommand = new FirstJoinKitCommand(firstJoinKitManager);
+        getCommand("firstjoinkit").setExecutor(firstJoinKitCommand);
 
         // Get save interval and batch size from config
         long saveIntervalTicks = getConfig().getLong("saveInterval.ticks", 1200L); // Default: 1 minute (1200 ticks)
@@ -136,5 +144,9 @@ public class Main extends JavaPlugin {
 
     public PlayerStatsManager getPlayerStatsManager() {
         return playerStatsManager;
+    }
+
+    public FirstJoinKitManager getFirstJoinKitManager() {
+        return firstJoinKitManager;
     }
 }

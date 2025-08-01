@@ -74,6 +74,17 @@ public class DatabaseManager {
                 "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" +
                 ");";
 
+        // Table for storing first join kit contents
+        String firstJoinKitSql = "CREATE TABLE IF NOT EXISTS first_join_kit (" +
+                "id INT PRIMARY KEY," +
+                "contents TEXT" +
+                ");";
+
+        // Table for tracking players who already received the kit
+        String firstJoinPlayersSql = "CREATE TABLE IF NOT EXISTS first_join_players (" +
+                "uuid VARCHAR(36) PRIMARY KEY" +
+                ");";
+
         try (Connection connection = getConnection()) {
             // Create player_data_info table
             try (PreparedStatement statement = connection.prepareStatement(playerDataSql)) {
@@ -85,6 +96,18 @@ public class DatabaseManager {
             try (PreparedStatement statement = connection.prepareStatement(playerStatsSql)) {
                 statement.execute();
                 plugin.getLogger().info("Player stats table created/verified.");
+            }
+
+            // Create first join kit table
+            try (PreparedStatement statement = connection.prepareStatement(firstJoinKitSql)) {
+                statement.execute();
+                plugin.getLogger().info("First join kit table created/verified.");
+            }
+
+            // Create first join players table
+            try (PreparedStatement statement = connection.prepareStatement(firstJoinPlayersSql)) {
+                statement.execute();
+                plugin.getLogger().info("First join players table created/verified.");
             }
         }
     }
