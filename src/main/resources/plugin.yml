@@ -14,6 +14,9 @@ commands:
     description: View player statistics
     usage: /<command> [player]
     aliases: [statistics, playerstats]
+  firstjoinkit:
+    description: Edit first join kit
+    usage: /<command>
 
 # Permissions
 permissions:
@@ -36,3 +39,7 @@ permissions:
       playerdataplugin.stats: true
       playerdataplugin.stats.others: true
       playerdataplugin.stats.reload: true
+      playerdataplugin.firstjoinkit: true
+  playerdataplugin.firstjoinkit:
+    description: Allows editing first join kit
+    default: op
