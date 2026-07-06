@@ -1,3 +1,6 @@
+# Enhanced Configuration for PlayerDataPlugin
+# Optimized for maximum data safety and prevention of item loss/duplication
+
 # Database connection settings
 database:
   host: "localhost"
@@ -5,30 +8,152 @@ database:
   name: "minecraft_data"
   user: "root"
   password: ""
-  # Maximum number of retry attempts for database operations
-  maxRetryAttempts: 3
-  # Delay between retry attempts in milliseconds
-  retryDelayMs: 1000
 
-# Debug mode - set to true to enable detailed logging
-debug: false
+  # Connection pool settings
+  pool:
+    # Maximum number of connections in the pool
+    maxPoolSize: 20
+    # Minimum idle connections
+    minIdle: 10
+    # Connection timeout in milliseconds
+    connectionTimeout: 30000
+    # Idle timeout in milliseconds
+    idleTimeout: 300000
+    # Maximum lifetime of a connection in milliseconds
+    maxLifetime: 1800000
+    # Leak detection threshold in milliseconds
+    leakDetectionThreshold: 60000
+
+  # Retry settings for failed operations
+  maxRetryAttempts: 5
+  retryDelayMs: 1000
+  # Exponential backoff multiplier
+  retryBackoffMultiplier: 1.5
+
+# Safety features
+safety:
+  # Enable data integrity checks (checksums)
+  enableChecksums: true
+
+  # Enable automatic backups
+  enableBackups: true
+  # Number of backups to keep per player
+  backupsPerPlayer: 10
+
+  # Enable optimistic locking (version control)
+  enableVersionControl: true
+
+  # Enable transaction logging for debugging
+  enableTransactionLog: true
+  # Days to keep transaction logs
+  transactionLogRetentionDays: 7
+
+  # Force save on these events
+  forceSaveOnEvents:
+    - PLAYER_QUIT
+    - PLAYER_DEATH
+    - SERVER_SHUTDOWN
+    - PLAYER_KICK
+    - PLAYER_WORLD_CHANGE
+
+  # Lock timeout in milliseconds
+  lockTimeoutMs: 5000
+
+  # Enable recovery mode (attempts to recover from backups on checksum mismatch)
+  enableRecoveryMode: true
 
 # Save interval settings
 saveInterval:
   # How often to save player data (in ticks, 20 ticks = 1 second)
-  # Default: 1200 ticks (1 minute)
-  ticks: 1200
+  # Lower values = more frequent saves but higher database load
+  ticks: 600  # 30 seconds
+
   # Percentage of online players to save in each batch
-  # Default: 20% (saves all players over 5 batches)
-  batchSizePercent: 20
+  # Lower values spread the load but take longer to save all players
+  batchSizePercent: 25
+
+  # Debounce time for inventory changes in milliseconds
+  # Prevents spam-saving on rapid inventory changes
+  debounceMs: 1000
+
+  # Maximum time to wait for a save operation in milliseconds
+  saveTimeoutMs: 3000
 
 # Player statistics saving settings
 statsInterval:
   # How often to save player statistics (in ticks, 20 ticks = 1 second)
-  ticks: 6000  # 5 minutes
+  ticks: 3000  # 2.5 minutes
+
+  # Enable atomic stat updates (prevents partial updates)
+  atomicUpdates: true
+
+# Performance settings
+performance:
+  # Number of threads for save operations
+  saveThreads: 4
+
+  # Number of threads for load operations
+  loadThreads: 4
+
+  # Enable async operations where possible
+  asyncOperations: true
+
+  # Cache settings
+  cache:
+    # Enable in-memory caching
+    enabled: true
+    # Cache expiration in seconds
+    expirationSeconds: 30
+    # Maximum cache size (number of players)
+    maxSize: 100
 
 # Death statistics settings
 deathStats:
   # Whether to count deaths caused by the /suicide command
-  # Set to false to not count suicide command deaths in player statistics
   countSuicideCommandDeaths: false
+
+  # Save inventory state before death
+  savePreDeathInventory: true
+
+# Emergency features
+emergency:
+  # Enable emergency save on server crash detection
+  crashDetection: true
+  # Interval to check for server freeze in seconds
+  freezeCheckInterval: 10
+  # Threshold for considering server frozen in seconds
+  freezeThreshold: 30
+
+  # Enable read-only mode when database issues detected
+  readOnlyOnDbError: true
+  # Number of consecutive DB errors before entering read-only mode
+  readOnlyThreshold: 10
+
+# Monitoring and alerts
+monitoring:
+  # Enable performance monitoring
+  enabled: true
+  # Log slow operations (milliseconds)
+  slowOperationThreshold: 1000
+  # Alert on data corruption detection
+  alertOnCorruption: true
+  # Alert on version conflicts
+  alertOnConflicts: true
+
+# Debug mode - set to true to enable detailed logging
+debug: false
+
+# Logging settings
+logging:
+  # Log all save operations
+  logSaves: true
+  # Log all load operations
+  logLoads: true
+  # Log cache hits/misses
+  logCache: false
+  # Log lock acquisitions
+  logLocks: false
+  # Maximum log file size in MB
+  maxLogSize: 50
+  # Number of log files to keep
+  maxLogFiles: 10

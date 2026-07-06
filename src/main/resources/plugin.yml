@@ -17,6 +17,9 @@ commands:
   firstjoinkit:
     description: Edit first join kit
     usage: /<command>
+  raffle:
+    description: Raffle an item to random players
+    usage: /<command> <number_of_winners>
 
 # Permissions
 permissions:
@@ -40,6 +43,11 @@ permissions:
       playerdataplugin.stats.others: true
       playerdataplugin.stats.reload: true
       playerdataplugin.firstjoinkit: true
+      playerdataplugin.raffle: true
   playerdataplugin.firstjoinkit:
     description: Allows editing first join kit
+    default: op
+
+  playerdataplugin.raffle:
+    description: Allows using raffle command
     default: op

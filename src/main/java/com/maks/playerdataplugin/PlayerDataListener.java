@@ -1,40 +1,64 @@
 package com.maks.playerdataplugin;
 
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.UUID;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.HashMap;
-import java.util.Map;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class PlayerDataListener implements Listener {
 
     private final Main plugin;
     private final FirstJoinKitManager kitManager;
-    private final Set<UUID> savingPlayers = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, PlayerData> playerDataCache = new HashMap<>();
+
+    // Thread-safe collections
+    private final ConcurrentHashMap<UUID, ReentrantLock> playerLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, AtomicBoolean> savingPlayers = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PlayerDataCache> dataCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, ScheduledFuture<?>> pendingSaves = new ConcurrentHashMap<>();
+
+    // Executor for async operations
+    private final ScheduledExecutorService saveExecutor = Executors.newScheduledThreadPool(4);
+    private final ExecutorService loadExecutor = Executors.newCachedThreadPool();
+
     private boolean debugMode = false;
-    private int maxRetryAttempts = 3;
+    private int maxRetryAttempts = 5;
     private long retryDelayMs = 1000;
 
-    // Inner class to store player data for caching
-    private static class PlayerData {
+    // Data integrity tracking
+    private final ConcurrentHashMap<UUID, String> lastKnownChecksum = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Integer> dataVersion = new ConcurrentHashMap<>();
+
+    private static class PlayerDataCache {
         final String inventoryData;
         final String armorData;
+        final String checksum;
+        final long timestamp;
+        final int version;
+        volatile boolean isDirty;
 
-        PlayerData(String inventoryData, String armorData) {
+        PlayerDataCache(String inventoryData, String armorData, String checksum, int version) {
             this.inventoryData = inventoryData;
             this.armorData = armorData;
+            this.checksum = checksum;
+            this.timestamp = System.currentTimeMillis();
+            this.version = version;
+            this.isDirty = false;
         }
     }
 
@@ -42,10 +66,8 @@ public class PlayerDataListener implements Listener {
         this.plugin = plugin;
         this.kitManager = kitManager;
         this.debugMode = plugin.getConfig().getBoolean("debug", false);
-        this.maxRetryAttempts = plugin.getConfig().getInt("database.maxRetryAttempts", 3);
+        this.maxRetryAttempts = plugin.getConfig().getInt("database.maxRetryAttempts", 5);
         this.retryDelayMs = plugin.getConfig().getLong("database.retryDelayMs", 1000);
-
-        logDebug("PlayerDataListener initialized with maxRetryAttempts=" + maxRetryAttempts + ", retryDelayMs=" + retryDelayMs);
     }
 
     private void logDebug(String message) {
@@ -54,301 +76,490 @@ public class PlayerDataListener implements Listener {
         }
     }
 
-    @EventHandler
+    private String calculateChecksum(String data) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to calculate checksum: " + e.getMessage());
+            return "";
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST) // Changed to LOWEST to allow other plugins to modify inventory after loading
     public void onPlayerJoin(PlayerJoinEvent event) {
-        UUID uuid = event.getPlayer().getUniqueId();
-        PlayerInventory inventory = event.getPlayer().getInventory();
-        String playerName = event.getPlayer().getName();
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+        String playerName = player.getName();
 
-        logDebug("Player " + playerName + " (" + uuid + ") joined, loading inventory data");
+        // Get or create player lock
+        ReentrantLock lock = playerLocks.computeIfAbsent(uuid, k -> new ReentrantLock());
 
-        // Clear the inventory to prevent default items
-        inventory.clear();
-        inventory.setArmorContents(null);
-        logDebug("Cleared inventory for player " + playerName);
+        // Lock to prevent concurrent modifications
+        lock.lock();
+        try {
+            logDebug("Player " + playerName + " joining, acquiring lock");
 
-        // Wait for any ongoing saves to complete
-        if (savingPlayers.contains(uuid)) {
-            logDebug("Player " + playerName + " has an ongoing save, waiting for it to complete");
-            while (savingPlayers.contains(uuid)) {
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    logDebug("Interrupted while waiting for save to complete for player " + playerName);
-                    break;
-                }
+            // Cancel any pending saves
+            ScheduledFuture<?> pendingSave = pendingSaves.remove(uuid);
+            if (pendingSave != null) {
+                pendingSave.cancel(false);
+                logDebug("Cancelled pending save for " + playerName);
             }
-            logDebug("Save completed for player " + playerName + ", proceeding with data load");
-        }
 
-        // Check if we have cached data (from a failed save)
-        PlayerData cachedData = playerDataCache.get(uuid);
-        if (cachedData != null) {
-            logDebug("Found cached data for player " + playerName + ", attempting to load");
+            // Clear inventory first to prevent any issues
+            PlayerInventory inventory = player.getInventory();
+            inventory.clear();
+            inventory.setArmorContents(null);
+
+            // Load data asynchronously but wait for completion
+            CompletableFuture<Boolean> loadFuture = loadPlayerDataAsync(player);
+
             try {
-                if (cachedData.inventoryData != null && !cachedData.inventoryData.isEmpty()) {
-                    logDebug("Deserializing cached inventory data for player " + playerName);
-                    ItemStack[] items = SerializationUtils.deserializeItemStackArray(cachedData.inventoryData);
-                    validateItems(items);
-                    inventory.setContents(items);
-                    logDebug("Successfully loaded cached inventory data for player " + playerName);
-                } else {
-                    logDebug("No cached inventory data found for player " + playerName);
+                boolean loaded = loadFuture.get(5, TimeUnit.SECONDS);
+                if (!loaded) {
+                    plugin.getLogger().warning("Failed to load data for " + playerName);
+                    // Give starter kit as fallback
+                    kitManager.giveKitIfFirstJoin(player);
                 }
-
-                if (cachedData.armorData != null && !cachedData.armorData.isEmpty()) {
-                    logDebug("Deserializing cached armor data for player " + playerName);
-                    ItemStack[] armor = SerializationUtils.deserializeItemStackArray(cachedData.armorData);
-                    validateItems(armor);
-                    inventory.setArmorContents(armor);
-                    logDebug("Successfully loaded cached armor data for player " + playerName);
-                } else {
-                    logDebug("No cached armor data found for player " + playerName);
-                }
-
-                plugin.getLogger().info("Loaded cached data for player " + playerName);
-                return;
+            } catch (TimeoutException e) {
+                plugin.getLogger().severe("Timeout loading data for " + playerName);
+                kitManager.giveKitIfFirstJoin(player);
             } catch (Exception e) {
-                plugin.getLogger().warning("Failed to load cached data for " + playerName + ", falling back to database");
-                logDebug("Error loading cached data for player " + playerName + ": " + e.getMessage());
+                plugin.getLogger().severe("Error loading data for " + playerName + ": " + e.getMessage());
+                kitManager.giveKitIfFirstJoin(player);
             }
-        } else {
-            logDebug("No cached data found for player " + playerName + ", loading from database");
+
+        } finally {
+            lock.unlock();
         }
+    }
+
+    private CompletableFuture<Boolean> loadPlayerDataAsync(Player player) {
+        return CompletableFuture.supplyAsync(() -> {
+            UUID uuid = player.getUniqueId();
+            String playerName = player.getName();
+
+            // Check cache first
+            PlayerDataCache cached = dataCache.get(uuid);
+            if (cached != null && !cached.isDirty) {
+                long age = System.currentTimeMillis() - cached.timestamp;
+                if (age < 30000) { // Cache valid for 30 seconds
+                    logDebug("Using cached data for " + playerName + " (age: " + age + "ms)");
+                    return applyDataToPlayer(player, cached);
+                }
+            }
+
+            // Load from database
+            try (Connection conn = plugin.getDatabaseManager().getConnection();
+                 PreparedStatement stmt = conn.prepareStatement(
+                         "SELECT inventory, armor, checksum, version FROM player_data_info WHERE uuid=?")) {
+
+                stmt.setString(1, uuid.toString());
+
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        String inventoryData = rs.getString("inventory");
+                        String armorData = rs.getString("armor");
+                        String checksum = rs.getString("checksum");
+                        int version = rs.getInt("version");
+
+                        // Verify data integrity
+                        String calculatedChecksum = calculateChecksum(inventoryData + armorData);
+                        if (checksum != null && !checksum.equals(calculatedChecksum)) {
+                            plugin.getLogger().warning("Checksum mismatch for " + playerName + ", attempting recovery");
+                            return recoverFromBackup(player);
+                        }
+
+                        // Cache the data
+                        PlayerDataCache newCache = new PlayerDataCache(inventoryData, armorData, checksum, version);
+                        dataCache.put(uuid, newCache);
+                        dataVersion.put(uuid, version);
+                        lastKnownChecksum.put(uuid, checksum);
+
+                        return applyDataToPlayer(player, newCache);
+                    } else {
+                        logDebug("No data found for new player " + playerName);
+                        // New player - give kit
+                        Bukkit.getScheduler().runTask(plugin, () -> kitManager.giveKitIfFirstJoin(player));
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                plugin.getLogger().severe("Failed to load data for " + playerName + ": " + e.getMessage());
+                e.printStackTrace();
+                return false;
+            }
+        }, loadExecutor);
+    }
+
+    private boolean applyDataToPlayer(Player player, PlayerDataCache cache) {
+        if (cache == null || cache.inventoryData == null) {
+            return false;
+        }
+
+        try {
+            PlayerInventory inventory = player.getInventory();
+            
+            // Zachowaj menu item przed załadowaniem
+            ItemStack menuItem = inventory.getItem(17);
+
+            // Apply inventory
+            if (!cache.inventoryData.isEmpty()) {
+                ItemStack[] items = SerializationUtils.deserializeItemStackArray(cache.inventoryData);
+                validateItems(items);
+                
+                // Nie nadpisuj slotu 17 (menu slot)
+                if (items.length > 17) {
+                    items[17] = null; // Pozostaw slot 17 pusty
+                }
+
+                // Apply on main thread
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    inventory.setContents(items);
+                    // Przywróć menu item jeśli był
+                    if (menuItem != null) {
+                        inventory.setItem(17, menuItem);
+                    }
+                });
+            }
+
+            // Apply armor
+            if (cache.armorData != null && !cache.armorData.isEmpty()) {
+                ItemStack[] armor = SerializationUtils.deserializeItemStackArray(cache.armorData);
+                validateItems(armor);
+
+                // Apply on main thread
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    inventory.setArmorContents(armor);
+                });
+            }
+
+            logDebug("Successfully applied data to player " + player.getName());
+            return true;
+
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to apply data to player: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean recoverFromBackup(Player player) {
+        UUID uuid = player.getUniqueId();
 
         try (Connection conn = plugin.getDatabaseManager().getConnection();
-             PreparedStatement stmt = conn.prepareStatement("SELECT inventory, armor FROM player_data_info WHERE uuid=?")) {
+             PreparedStatement stmt = conn.prepareStatement(
+                     "SELECT inventory, armor FROM player_data_backup WHERE uuid=? ORDER BY backup_time DESC LIMIT 1")) {
 
-            logDebug("Querying database for player " + playerName + " data");
             stmt.setString(1, uuid.toString());
 
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    logDebug("Found database record for player " + playerName);
                     String inventoryData = rs.getString("inventory");
                     String armorData = rs.getString("armor");
 
-                    if (inventoryData != null && !inventoryData.isEmpty()) {
-                        logDebug("Deserializing inventory data for player " + playerName);
-                        try {
-                            ItemStack[] items = SerializationUtils.deserializeItemStackArray(inventoryData);
-                            validateItems(items);
-                            inventory.setContents(items);
-                            logDebug("Successfully loaded inventory data for player " + playerName);
-                        } catch (Exception e) {
-                            plugin.getLogger().warning("Corrupted inventory data for " + playerName);
-                            logDebug("Error deserializing inventory data for player " + playerName + ": " + e.getMessage());
-                        }
-                    } else {
-                        logDebug("No inventory data found in database for player " + playerName);
-                    }
+                    PlayerDataCache recoveredCache = new PlayerDataCache(
+                            inventoryData, armorData, "", 0
+                    );
 
-                    if (armorData != null && !armorData.isEmpty()) {
-                        logDebug("Deserializing armor data for player " + playerName);
-                        try {
-                            ItemStack[] armor = SerializationUtils.deserializeItemStackArray(armorData);
-                            validateItems(armor);
-                            inventory.setArmorContents(armor);
-                            logDebug("Successfully loaded armor data for player " + playerName);
-                        } catch (Exception e) {
-                            plugin.getLogger().warning("Corrupted armor data for " + playerName);
-                            logDebug("Error deserializing armor data for player " + playerName + ": " + e.getMessage());
-                        }
-                    } else {
-                        logDebug("No armor data found in database for player " + playerName);
-                    }
-                } else {
-                    logDebug("No database record found for player " + playerName + ", using empty inventory");
+                    plugin.getLogger().info("Recovered data from backup for " + player.getName());
+                    return applyDataToPlayer(player, recoveredCache);
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
-            plugin.getLogger().severe("Failed to load player data for " + playerName);
-            logDebug("Database error while loading data for player " + playerName + ": " + e.getMessage());
+            plugin.getLogger().severe("Failed to recover from backup: " + e.getMessage());
         }
-        // Give starter kit if applicable
-        kitManager.giveKitIfFirstJoin(event.getPlayer());
 
-        logDebug("Finished loading data for player " + playerName);
+        return false;
     }
 
     private void validateItems(ItemStack[] items) {
         if (items == null) return;
 
-        int validatedCount = 0;
         for (int i = 0; i < items.length; i++) {
             ItemStack item = items[i];
             if (item != null) {
-                // Check for invalid stack size
+                // Validate stack size
                 if (item.getAmount() > item.getMaxStackSize()) {
-                    logDebug("Found item with invalid stack size: " + item.getType() + " x" + item.getAmount() + " (max: " + item.getMaxStackSize() + "), correcting");
                     item.setAmount(item.getMaxStackSize());
                 }
-
-                // Check for other potential issues here if needed
-
-                validatedCount++;
+                // Validate amount is positive
+                if (item.getAmount() <= 0) {
+                    items[i] = null;
+                }
             }
         }
-        logDebug("Validated " + validatedCount + " items out of " + items.length + " total slots");
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST) // Lowest priority to ensure we're first
     public void onPlayerQuit(PlayerQuitEvent event) {
-        savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+
+        // Force immediate save on quit
+        savePlayerDataImmediate(uuid, player.getInventory());
     }
 
-    public void savePlayerData(UUID uuid, PlayerInventory inventory) {
-        // Skip if already saving this player's data
-        if (!savingPlayers.add(uuid)) {
-            logDebug("Already saving data for player " + uuid + ", skipping");
+    public void savePlayerDataImmediate(UUID uuid, PlayerInventory inventory) {
+        ReentrantLock lock = playerLocks.computeIfAbsent(uuid, k -> new ReentrantLock());
+
+        if (!lock.tryLock()) {
+            logDebug("Could not acquire lock for immediate save of " + uuid);
+            // Schedule retry
+            saveExecutor.schedule(() -> savePlayerDataImmediate(uuid, inventory), 100, TimeUnit.MILLISECONDS);
             return;
         }
 
-        logDebug("Starting save for player " + uuid);
+        try {
+            // Cancel any pending saves
+            ScheduledFuture<?> pendingSave = pendingSaves.remove(uuid);
+            if (pendingSave != null) {
+                pendingSave.cancel(false);
+            }
 
-        // Cache the data in case of failure
-        String inventoryData = SerializationUtils.serializeItemStackArray(inventory.getContents());
+            // Perform synchronous save for quit events
+            performSave(uuid, inventory, true);
+
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void savePlayerData(UUID uuid, PlayerInventory inventory) {
+        // Cancel existing pending save
+        ScheduledFuture<?> existing = pendingSaves.get(uuid);
+        if (existing != null && !existing.isDone()) {
+            existing.cancel(false);
+        }
+
+        // Schedule new save with debounce
+        ScheduledFuture<?> future = saveExecutor.schedule(() -> {
+            ReentrantLock lock = playerLocks.computeIfAbsent(uuid, k -> new ReentrantLock());
+
+            if (lock.tryLock()) {
+                try {
+                    performSave(uuid, inventory, false);
+                } finally {
+                    lock.unlock();
+                }
+            } else {
+                logDebug("Could not acquire lock for scheduled save of " + uuid);
+            }
+        }, 1, TimeUnit.SECONDS);
+
+        pendingSaves.put(uuid, future);
+    }
+
+    private void performSave(UUID uuid, PlayerInventory inventory, boolean immediate) {
+        // Skopiuj inventory bez slotu 17
+        ItemStack[] contents = inventory.getContents().clone();
+        if (contents.length > 17) {
+            contents[17] = null; // Nie zapisuj menu item
+        }
+        
+        String inventoryData = SerializationUtils.serializeItemStackArray(contents);
         String armorData = SerializationUtils.serializeItemStackArray(inventory.getArmorContents());
-        playerDataCache.put(uuid, new PlayerData(inventoryData, armorData));
-        logDebug("Cached data for player " + uuid + " (inventory size: " + inventory.getContents().length + ", armor size: " + inventory.getArmorContents().length + ")");
+        String checksum = calculateChecksum(inventoryData + armorData);
 
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            logDebug("Running async save task for player " + uuid);
+        // Update cache
+        int currentVersion = dataVersion.getOrDefault(uuid, 0);
+        PlayerDataCache newCache = new PlayerDataCache(inventoryData, armorData, checksum, currentVersion + 1);
+        dataCache.put(uuid, newCache);
+
+        // Create backup first
+        createBackup(uuid, inventoryData, armorData, immediate ? "QUIT" : "PERIODIC");
+
+        // Save to database with retry logic
+        CompletableFuture<Boolean> saveFuture = saveToDatabase(uuid, inventoryData, armorData, checksum, currentVersion);
+
+        if (immediate) {
+            // Wait for save to complete on quit
             try {
-                int attempts = 0;
-                boolean success = false;
+                boolean saved = saveFuture.get(3, TimeUnit.SECONDS);
+                if (!saved) {
+                    plugin.getLogger().severe("Failed to save data for " + uuid + " on quit!");
+                }
+            } catch (Exception e) {
+                plugin.getLogger().severe("Error saving data on quit: " + e.getMessage());
+            }
+        }
+    }
 
-                while (attempts < maxRetryAttempts && !success) {
-                    try (Connection conn = plugin.getDatabaseManager().getConnection();
-                         PreparedStatement stmt = conn.prepareStatement(
-                                 "REPLACE INTO player_data_info (uuid, inventory, armor) VALUES (?, ?, ?)")) {
+    private CompletableFuture<Boolean> saveToDatabase(UUID uuid, String inventoryData, String armorData, String checksum, int expectedVersion) {
+        return CompletableFuture.supplyAsync(() -> {
+            int attempts = 0;
 
-                        logDebug("Attempt " + (attempts + 1) + " to save data for player " + uuid);
-                        stmt.setString(1, uuid.toString());
-                        stmt.setString(2, inventoryData);
-                        stmt.setString(3, armorData);
-                        stmt.executeUpdate();
+            while (attempts < maxRetryAttempts) {
+                attempts++;
 
-                        success = true;
-                        playerDataCache.remove(uuid); // Success, remove from cache
-                        logDebug("Successfully saved data for player " + uuid);
-                    } catch (Exception e) {
-                        attempts++;
-                        if (attempts >= maxRetryAttempts) {
-                            e.printStackTrace();
-                            plugin.getLogger().severe("Failed to save player data for UUID: " + uuid + " after " + maxRetryAttempts + " attempts!");
-                            plugin.getLogger().severe("Error: " + e.getMessage());
-                            logDebug("Save failed after " + maxRetryAttempts + " attempts for player " + uuid + ". Error: " + e.getMessage());
-                            // Keep in cache for manual recovery
-                        } else {
-                            plugin.getLogger().warning("Failed to save player data for UUID: " + uuid + ", attempt " + attempts + " of " + maxRetryAttempts + ". Retrying...");
-                            logDebug("Save attempt " + attempts + " failed for player " + uuid + ". Error: " + e.getMessage() + ". Retrying in " + (retryDelayMs / 1000.0) + " seconds...");
-                            try {
-                                Thread.sleep(retryDelayMs); // Wait before retry
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
-                                logDebug("Interrupted while waiting to retry save for player " + uuid);
-                                break;
+                try (Connection conn = plugin.getDatabaseManager().getConnection()) {
+                    conn.setAutoCommit(false);
+
+                    // Check version for optimistic locking
+                    try (PreparedStatement checkStmt = conn.prepareStatement(
+                            "SELECT version FROM player_data_info WHERE uuid = ?")) {
+                        checkStmt.setString(1, uuid.toString());
+
+                        try (ResultSet rs = checkStmt.executeQuery()) {
+                            if (rs.next()) {
+                                int dbVersion = rs.getInt("version");
+                                if (dbVersion > expectedVersion) {
+                                    plugin.getLogger().warning("Version conflict for " + uuid +
+                                            " (expected: " + expectedVersion + ", found: " + dbVersion + ")");
+                                    conn.rollback();
+                                    return false;
+                                }
                             }
                         }
                     }
+
+                    // Perform update with version increment
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "INSERT INTO player_data_info (uuid, inventory, armor, checksum, version) " +
+                                    "VALUES (?, ?, ?, ?, ?) " +
+                                    "ON DUPLICATE KEY UPDATE " +
+                                    "inventory = VALUES(inventory), " +
+                                    "armor = VALUES(armor), " +
+                                    "checksum = VALUES(checksum), " +
+                                    "version = VALUES(version)")) {
+
+                        stmt.setString(1, uuid.toString());
+                        stmt.setString(2, inventoryData);
+                        stmt.setString(3, armorData);
+                        stmt.setString(4, checksum);
+                        stmt.setInt(5, expectedVersion + 1);
+
+                        stmt.executeUpdate();
+                    }
+
+                    // Log transaction
+                    try (PreparedStatement logStmt = conn.prepareStatement(
+                            "INSERT INTO transaction_log (uuid, action, status, details) VALUES (?, ?, ?, ?)")) {
+                        logStmt.setString(1, uuid.toString());
+                        logStmt.setString(2, "SAVE");
+                        logStmt.setString(3, "SUCCESS");
+                        logStmt.setString(4, "Version: " + (expectedVersion + 1) + ", Checksum: " + checksum.substring(0, 8));
+                        logStmt.executeUpdate();
+                    }
+
+                    conn.commit();
+
+                    // Update local version tracking
+                    dataVersion.put(uuid, expectedVersion + 1);
+                    lastKnownChecksum.put(uuid, checksum);
+
+                    logDebug("Successfully saved data for " + uuid + " (version: " + (expectedVersion + 1) + ")");
+                    return true;
+
+                } catch (SQLException e) {
+                    if (attempts >= maxRetryAttempts) {
+                        plugin.getLogger().severe("Failed to save after " + attempts + " attempts: " + e.getMessage());
+                        return false;
+                    }
+
+                    try {
+                        Thread.sleep(retryDelayMs * attempts);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
                 }
-            } finally {
-                savingPlayers.remove(uuid);
-                logDebug("Finished save process for player " + uuid + " (removed from savingPlayers set)");
+            }
+
+            return false;
+        }, saveExecutor);
+    }
+
+    private void createBackup(UUID uuid, String inventoryData, String armorData, String reason) {
+        saveExecutor.execute(() -> {
+            try (Connection conn = plugin.getDatabaseManager().getConnection();
+                 PreparedStatement stmt = conn.prepareStatement(
+                         "INSERT INTO player_data_backup (uuid, inventory, armor, reason) VALUES (?, ?, ?, ?)")) {
+
+                stmt.setString(1, uuid.toString());
+                stmt.setString(2, inventoryData);
+                stmt.setString(3, armorData);
+                stmt.setString(4, reason);
+
+                stmt.executeUpdate();
+
+                // Clean old backups (keep last 10)
+                try (PreparedStatement cleanStmt = conn.prepareStatement(
+                        "DELETE FROM player_data_backup WHERE uuid = ? AND id NOT IN " +
+                                "(SELECT id FROM (SELECT id FROM player_data_backup WHERE uuid = ? " +
+                                "ORDER BY backup_time DESC LIMIT 10) AS t)")) {
+                    cleanStmt.setString(1, uuid.toString());
+                    cleanStmt.setString(2, uuid.toString());
+                    cleanStmt.executeUpdate();
+                }
+
+            } catch (Exception e) {
+                logDebug("Failed to create backup: " + e.getMessage());
             }
         });
     }
 
-    @EventHandler
+    public void shutdown() {
+        // Save all online players
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            savePlayerDataImmediate(player.getUniqueId(), player.getInventory());
+        }
+
+        // Shutdown executors
+        saveExecutor.shutdown();
+        loadExecutor.shutdown();
+
+        try {
+            if (!saveExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                saveExecutor.shutdownNow();
+            }
+            if (!loadExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                loadExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            saveExecutor.shutdownNow();
+            loadExecutor.shutdownNow();
+        }
+    }
+
+    // Event handlers for inventory changes - using debounced saves
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClose(org.bukkit.event.inventory.InventoryCloseEvent event) {
-        if (event.getPlayer() instanceof org.bukkit.entity.Player) {
-            org.bukkit.entity.Player player = (org.bukkit.entity.Player) event.getPlayer();
+        if (event.getPlayer() instanceof Player) {
+            Player player = (Player) event.getPlayer();
             savePlayerData(player.getUniqueId(), player.getInventory());
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onItemDrop(org.bukkit.event.player.PlayerDropItemEvent event) {
-        // Save after a delay to batch multiple drops
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
-        }, 20L); // 1 second delay
+        savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClick(org.bukkit.event.inventory.InventoryClickEvent event) {
-        if (event.getWhoClicked() instanceof org.bukkit.entity.Player) {
-            org.bukkit.entity.Player player = (org.bukkit.entity.Player) event.getWhoClicked();
-            // Save after a delay to batch multiple clicks
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                savePlayerData(player.getUniqueId(), player.getInventory());
-            }, 20L); // 1 second delay
+        if (event.getWhoClicked() instanceof Player) {
+            Player player = (Player) event.getWhoClicked();
+            savePlayerData(player.getUniqueId(), player.getInventory());
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onItemPickup(org.bukkit.event.entity.EntityPickupItemEvent event) {
-        if (event.getEntity() instanceof org.bukkit.entity.Player) {
-            org.bukkit.entity.Player player = (org.bukkit.entity.Player) event.getEntity();
-            // Save after a delay to batch multiple pickups
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                savePlayerData(player.getUniqueId(), player.getInventory());
-            }, 20L); // 1 second delay
+        if (event.getEntity() instanceof Player) {
+            Player player = (Player) event.getEntity();
+            savePlayerData(player.getUniqueId(), player.getInventory());
         }
     }
 
-    @EventHandler
-    public void onCraftItem(org.bukkit.event.inventory.CraftItemEvent event) {
-        if (event.getWhoClicked() instanceof org.bukkit.entity.Player) {
-            org.bukkit.entity.Player player = (org.bukkit.entity.Player) event.getWhoClicked();
-            // Save after a delay to batch multiple crafts
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                savePlayerData(player.getUniqueId(), player.getInventory());
-            }, 20L); // 1 second delay
-        }
-    }
-
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerDeath(org.bukkit.event.entity.PlayerDeathEvent event) {
-        // Save player data after death (inventory will be empty or modified based on keepInventory gamerule)
-        // This ensures we capture the state after death
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getEntity().getUniqueId(), event.getEntity().getInventory());
-        }, 5L); // Short delay to ensure death processing is complete
-    }
-
-    @EventHandler
-    public void onPlayerRespawn(org.bukkit.event.player.PlayerRespawnEvent event) {
-        // Save player data after respawn (inventory might be restored based on keepInventory gamerule)
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
-        }, 5L); // Short delay to ensure respawn processing is complete
-    }
-
-    @EventHandler
-    public void onItemConsume(org.bukkit.event.player.PlayerItemConsumeEvent event) {
-        // Save player data after consuming an item (like potions, food)
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
-        }, 5L); // Short delay to ensure item consumption is complete
-    }
-
-    @EventHandler
-    public void onItemBreak(org.bukkit.event.player.PlayerItemBreakEvent event) {
-        // Save player data after an item breaks (like tools, armor)
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
-        }, 5L); // Short delay to ensure item break processing is complete
-    }
-
-    @EventHandler
-    public void onSwapHandItems(org.bukkit.event.player.PlayerSwapHandItemsEvent event) {
-        // Save player data after swapping items between main hand and off hand
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            savePlayerData(event.getPlayer().getUniqueId(), event.getPlayer().getInventory());
-        }, 5L); // Short delay to ensure hand swap processing is complete
+        // Immediate save on death
+        savePlayerDataImmediate(event.getEntity().getUniqueId(), event.getEntity().getInventory());
     }
 }
